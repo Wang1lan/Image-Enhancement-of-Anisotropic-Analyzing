@@ -10,7 +10,7 @@ scriptDir = fileparts(mfilename('fullpath'));
 addpath(fullfile(scriptDir, 'functions'));
 
 %% 集中配置：图像、主路径与引导降噪须与增强 demo 一致
-imgPath = fullfile(scriptDir, 'testImg', 'WLI.jpg');
+imgPath = fullfile(scriptDir, 'testImg', 'WLI_1.jpg');
 noiseROI = []; % 平坦噪声区：[x1 y1 x2 y2]；空时鼠标选取
 structureROI = []; % 可信边缘/血管结构区，避免大量平坦背景
 noisePercentile = 90;
@@ -35,7 +35,7 @@ opts.denoise = struct('enable', true, 'method', 'bilateral', ...
 maskParams.Te = round(255 * 0.93);
 maskParams.Th = round(255 * 0.85);
 maskParams.Tl = round(255 * 0.10);
-maskParams.dilateSizes = 5;
+maskParams.dilateSizes = 7;
 maskParams.numGaussian = 1;
 
 %% 复现增强端 Iwork -> Y 的分析节点；不提前裁剪 ROI 再滤波

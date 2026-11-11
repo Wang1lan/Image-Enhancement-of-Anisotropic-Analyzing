@@ -6,7 +6,7 @@ close all;
 % 使用：先运行 demo_gradientWeight，将标定门限复制到下方 GLow/GHigh。
 projectDir = fileparts(mfilename('fullpath'));
 addpath(fullfile(projectDir, 'functions'));
-imgPath = fullfile(projectDir, 'testImg', 'WLI.jpg');
+imgPath = fullfile(projectDir, 'testImg', 'WLI_1.jpg');
 img = imread(imgPath);
 
 enhanceMode = 'Y'; % 'RGB'、'Y' 或 'BOTH'；BOTH 为两条独立增强分支
@@ -23,7 +23,7 @@ denoise.guidedEps = 4; % 原生灰度级平方
 % 两频段、RGB 三通道共享同一亮度权重；门限不可沿用结构张量的 S 门限。
 gradientWeight.enable = true; % false：NW 无自适应权重基线
 gradientWeight.opts = struct('inputMax', 255, ...
-    'GLow', 0.002577589321799488, 'GHigh', 0.0073215579009307877, 'Wmin', 0.3, ...
+    'GLow', 0.0024894783978878089, 'GHigh', 0.0071887207526713029, 'Wmin', 0.3, ...
     'validMask', [], 'debugLevel', 'off'); % 'off' / 'stats' / 'maps'
 gradientWeight.opts.denoise = struct('enable', true, ...
     'method', 'bilateral', 'windowSize', 5, ...
@@ -148,7 +148,11 @@ if gradientWeight.enable
         showGradientWeightDebug(gradientDebug, struct('save', false));
     end
 end
-detailWeight = (1-softMask) .* W;
+
+windowSize = 9;
+W_smooth = imboxfilt(W, windowSize, 'Padding', 'symmetric');
+
+detailWeight = (1-softMask) .* W_smooth;
 experimentLabel = [weightLabel ' | ' denoiseLabel];
 
 %% 两条独立增强分支：底图与两路细节均来自 Iwork
