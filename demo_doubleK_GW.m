@@ -7,6 +7,8 @@ close all;
 projectDir = fileparts(mfilename('fullpath'));
 addpath(fullfile(projectDir, 'functions'));
 imgPath = fullfile(projectDir, 'testImg', 'WLI_1.jpg');
+assert(isfile(imgPath), 'demo_doubleK_GW:ImageMissing', ...
+    '找不到输入图像 %s，请检查 testImg 目录或修改 imgPath。', imgPath);
 img = imread(imgPath);
 
 enhanceMode = 'Y'; % 'RGB'、'Y' 或 'BOTH'；BOTH 为两条独立增强分支
@@ -28,8 +30,12 @@ gradientWeight.opts = struct('inputMax', 255, ...
 gradientWeight.opts.denoise = struct('enable', true, ...
     'method', 'bilateral', 'windowSize', 5, ...
     'sigmaSpatial', 1.5, 'sigmaRange', 10, 'guidedEps', 4);
+gradientWeight.opts.mapping = struct('type', 'smoothstep', 'gamma', 2);
+% type 为 'linear' / 'power' / 'smoothstep'；gamma 仅用于 power。
+weightSmooth.windowSize = 9; % 映射后的权重均值滤波，边界为 symmetric
 % 权重支路 denoise.enable=false：GW_raw 对照；true：方案 C。
 % 输入节点、引导方法/参数改变后，应重新标定，不能静默沿用旧门限。
+% 同一来源比较三种映射时，使用同一组 GLow/GHigh。
 
 detailSign = 1;
 % bandpassFilter_B 的 scaleLowFreq 固定为 1；这里只列出实际生效的核参数。
@@ -126,33 +132,50 @@ if runY || gradientWeight.enable
     Ywork = yccWork(:,:,1);
 end
 W = ones(size(softMask));
+gradientDebug = struct();
 weightLabel = 'NW';
+source = 'off';
+sourceLabel = 'off';
+mappingLabel = 'off';
 if gradientWeight.enable
     Yanalysis = min(max(Ywork, 0), 255); % 仅修正分析输入的浮点越界
-    analysisOpts = gradientWeight.opts;
-    if saveResults
-        analysisOpts.debugLevel = 'maps'; % 保存精确 G/W；不改变权重计算
-    end
-    [W, gradientDebug] = computeGradientWeight(Yanalysis, analysisOpts);
-    weightLabel = 'GW_raw';
+    [W, gradientDebug] = computeGradientWeight(Yanalysis, gradientWeight.opts);
+    source = 'raw';
+    sourceLabel = 'raw';
     if gradientWeight.opts.denoise.enable && gradientWeight.opts.denoise.windowSize > 1
-        weightLabel = ['GW_' char(gradientWeight.opts.denoise.method)];
+        source = 'denoised';
+        sourceLabel = validatestring(gradientWeight.opts.denoise.method, {'bilateral','guided'});
     end
-    fprintf('%s | node=%s | GLow=%.17g, GHigh=%.17g, Wmin=%g\n', ...
-        weightLabel, analysisNode, gradientWeight.opts.GLow, ...
-        gradientWeight.opts.GHigh, gradientWeight.opts.Wmin);
+    mappingType = validatestring(gradientWeight.opts.mapping.type, {'linear','power','smoothstep'});
+    mappingLabel = [upper(mappingType(1)) mappingType(2:end)];
+    if strcmp(mappingType, 'power')
+        mappingLabel = sprintf('Power_g%.17g', gradientWeight.opts.mapping.gamma);
+    end
+    weightLabel = ['GW_' sourceLabel '_' mappingLabel];
+    fprintf('%s | source=%s | node=%s | mapping=%s, gamma=%.17g\n', ...
+        weightLabel, source, analysisNode, mappingType, gradientWeight.opts.mapping.gamma);
+    fprintf('GLow=%.17g, GHigh=%.17g, Wmin=%g, weightSmooth=%dx%d (symmetric)\n', ...
+        gradientWeight.opts.GLow, gradientWeight.opts.GHigh, gradientWeight.opts.Wmin, ...
+        weightSmooth.windowSize, weightSmooth.windowSize);
+    fprintf('改变梯度来源、分析节点或权重支路降噪参数后，请重新标定门限。\n');
     if denoise.enable
         fprintf('组合实验：主路径降噪 + 梯度权重；标定必须使用相同 Iwork 节点和配置。\n');
     end
-    if strcmp(gradientWeight.opts.debugLevel, 'maps') && ~saveResults
+end
+gradientWeight.sourceLabel = sourceLabel;
+gradientWeight.mappingLabel = mappingLabel;
+
+W_smooth = imboxfilt(W, weightSmooth.windowSize, 'Padding', 'symmetric');
+
+detailWeight = (1-softMask) .* W_smooth;
+if isfield(gradientDebug, 'W')
+    gradientDebug.W_smooth = W_smooth;
+    gradientDebug.detailWeight = detailWeight;
+    gradientDebug.weightSmooth = weightSmooth;
+    if ~saveResults
         showGradientWeightDebug(gradientDebug, struct('save', false));
     end
 end
-
-windowSize = 9;
-W_smooth = imboxfilt(W, windowSize, 'Padding', 'symmetric');
-
-detailWeight = (1-softMask) .* W_smooth;
 experimentLabel = [weightLabel ' | ' denoiseLabel];
 
 %% 两条独立增强分支：底图与两路细节均来自 Iwork
@@ -260,9 +283,9 @@ if saveResults
     [~, imgName] = fileparts(imgPath);
     prefix = sprintf('%s_%s_main%d-%s-%s', imgName, enhanceMode, denoise.enable, ...
         denoise.method, denoise.mode);
-    tag = [prefix '_NW_' char(datetime('now', 'Format', 'yyyyMMdd''T''HHmmssSSS'))];
+    tag = [prefix '_' weightLabel '_' char(datetime('now', 'Format', 'yyyyMMdd''T''HHmmssSSS'))];
     saveOption = '-v7';
-    if gradientWeight.enable
+    if isfield(gradientDebug, 'W')
         savedDebug = showGradientWeightDebug(gradientDebug, ...
             struct('save', true, 'outputDir', outputDir, 'prefix', prefix));
         tag = savedDebug.outputTag;
@@ -276,5 +299,12 @@ if saveResults
     end
     save(fullfile(outputDir, [tag '_params.mat']), 'imgPath', 'enhanceMode', ...
         'denoise', 'gradientWeight', 'analysisNode', 'bp', 'kernel_1', 'kernel_2', ...
-        'detailSign', 'detailGain_1', 'detailGain_2', 'maskParams', 'evalParams', saveOption);
+        'detailSign', 'detailGain_1', 'detailGain_2', 'maskParams', 'evalParams', ...
+        'source', 'sourceLabel', 'mappingLabel', 'weightSmooth', ...
+        'W', 'W_smooth', 'detailWeight', saveOption);
+    if isfield(gradientDebug, 'paramsUsed')
+        paramsUsed = gradientDebug.paramsUsed;
+        stats = gradientDebug.stats;
+        save(fullfile(outputDir, [tag '_params.mat']), 'paramsUsed', 'stats', '-append');
+    end
 end

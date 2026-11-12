@@ -28,9 +28,14 @@ denoise.guidedEps = 4;
 
 opts = struct('inputMax', 255, 'GLow', 0, 'GHigh', 1, 'Wmin', 0.3, ...
     'validMask', [], 'debugLevel', 'maps');
-opts.denoise = struct('enable', true, 'method', 'bilateral', ...
+opts.denoise = struct('enable', false, 'method', 'bilateral', ...
     'windowSize', 5, 'sigmaSpatial', 1.5, 'sigmaRange', 10, 'guidedEps', 4);
+% opts.denoise.enable 控制权重分析支路，denoise.enable 控制增强主路径。
+opts.mapping = struct('type', 'linear', 'gamma', 2);
+% type 为 'linear' / 'power' / 'smoothstep'；gamma 仅用于 power。
+weightSmooth.windowSize = 9; % 与增强 Demo 一致的 symmetric 均值平滑
 % 首次的 GLow=0、GHigh=1 仅采集梯度分布；占位 W 不用于增强或最终权重展示。
+% 来源、分析节点或降噪参数改变后重标定；同一来源比较映射时使用同组门限。
 
 maskParams.Te = round(255 * 0.93);
 maskParams.Th = round(255 * 0.85);
@@ -39,6 +44,8 @@ maskParams.dilateSizes = 7;
 maskParams.numGaussian = 1;
 
 %% 复现增强端 Iwork -> Y 的分析节点；不提前裁剪 ROI 再滤波
+assert(isfile(imgPath), 'demo_gradientWeight:ImageMissing', ...
+    '找不到输入图像 %s，请检查 testImg 目录或修改 imgPath。', imgPath);
 img = imread(imgPath);
 assert(isa(img, 'uint8') && ndims(img) == 3 && size(img,3) == 3, ...
     'demo_gradientWeight:Input', '与增强 demo 一致，输入必须为 RGB uint8。');
@@ -87,18 +94,32 @@ Yanalysis = min(max(yccWork(:,:,1), 0), 255); % 仅分析输入限幅，不回�
 d = dbgCalib.paramsUsed.denoise;
 guideRadius = 0;
 method = 'raw';
+source = 'raw';
 if d.enable && d.windowSize > 1
     guideRadius = floor(d.windowSize/2);
     method = d.method;
+    source = 'denoised';
     if strcmp(d.method, 'guided')
         guideRadius = 2*guideRadius; % guided 的统计与系数平均扩大有效支撑
     end
+end
+mapping = dbgCalib.paramsUsed.mapping;
+mappingLabel = [upper(mapping.type(1)) mapping.type(2:end)];
+if strcmp(mapping.type, 'power')
+    mappingLabel = sprintf('Power_g%.17g', mapping.gamma);
 end
 margin = mainRadius + guideRadius + 1; % 末尾 1 为 Sobel 半径
 [softMask, ~] = buildHighlightMask(img, maskParams);
 calibrationMask = dbgCalib.validMask & (softMask == 0);
 [~, imgName] = fileparts(imgPath);
-fprintf('Input: %s | node: %s | GW_%s\n', imgName, analysisNode, method);
+fprintf('Input=%s | source=%s | node=%s | GW_%s_%s\n', ...
+    imgName, source, analysisNode, method, mappingLabel);
+fprintf('主路径降噪 enable=%d, method=%s, mode=%s\n', ...
+    denoise.enable, denoise.method, denoise.mode);
+fprintf('权重支路降噪 enable=%d, method=%s, window=%g, sigmaSpatial=%g, sigmaRange=%g, guidedEps=%g\n', ...
+    d.enable, d.method, d.windowSize, d.sigmaSpatial, d.sigmaRange, d.guidedEps);
+fprintf('mapping=%s, gamma=%.17g, Wmin=%g, weightSmooth=%dx%d (symmetric)\n', ...
+    mapping.type, mapping.gamma, opts.Wmin, weightSmooth.windowSize, weightSmooth.windowSize);
 fprintf('inputMax=255, Sobel /8, L1; ROI 支撑边距至少 %d 像素。\n', margin);
 
 %% 在原图选 ROI，样本取自已完成整图分析的 G
@@ -144,13 +165,15 @@ grid(axG, 'on'); legend(axG, 'Location', 'best');
 % 即使门限重叠，也保留 ROI、候选值和分布；不生成伪成功权重。
 calibration = struct('inputPath', imgPath, 'imageSize', size(img), ...
     'analysisNode', analysisNode, 'mainDenoise', denoise, ...
+    'source', source, 'sourceLabel', method, 'mappingLabel', mappingLabel, ...
+    'weightSmooth', weightSmooth, ...
     'paramsUsed', dbgCalib.paramsUsed, 'maskParams', maskParams, ...
     'roiFormat', '[x1 y1 x2 y2], 1-based inclusive', ...
     'noiseROI', noiseROI, 'structureROI', structureROI, 'margin', margin, ...
     'noisePercentile', noisePercentile, 'structurePercentile', structurePercentile, ...
     'candidateLow', candidateLow, 'candidateHigh', candidateHigh, ...
     'status', 'threshold_overlap', 'MATLABVersion', version);
-tag = sprintf('%s_GW_%s_G%.6g-%.6g_W%g_%s', imgName, method, ...
+tag = sprintf('%s_GW_%s_%s_G%.6g-%.6g_W%g_%s', imgName, method, mappingLabel, ...
     candidateLow, candidateHigh, opts.Wmin, char(datetime('now', 'Format', 'yyyyMMdd''T''HHmmssSSS')));
 if saveResults
     if ~isfolder(outputDir)
@@ -172,6 +195,9 @@ opts.GLow = candidateLow;
 opts.GHigh = candidateHigh;
 clear dbgCalib;
 [W, dbg] = computeGradientWeight(Yanalysis, opts);
+W_smooth = imboxfilt(W, weightSmooth.windowSize, 'Padding', 'symmetric');
+dbg.W_smooth = W_smooth;
+dbg.weightSmooth = weightSmooth;
 roiStats = [roiStats; roiStatistics(W(noiseMask), 'noise', 'W'); ...
     roiStatistics(W(structureMask), 'structure', 'W')];
 calibration.paramsUsed = dbg.paramsUsed;
@@ -180,11 +206,23 @@ disp(roiStats);
 fprintf('\n复制到 demo_doubleK_GW（须保持同一分析节点与引导配置）：\n');
 fprintf('gradientWeight.opts.GLow = %.17g;\n', opts.GLow);
 fprintf('gradientWeight.opts.GHigh = %.17g;\n', opts.GHigh);
+fprintf('gradientWeight.opts.Wmin = %.17g;\n', opts.Wmin);
+fprintf(['gradientWeight.opts.denoise = struct(''enable'',%s,''method'',''%s'',' ...
+    '''windowSize'',%g,''sigmaSpatial'',%.17g,''sigmaRange'',%.17g,''guidedEps'',%.17g);\n'], ...
+    mat2str(d.enable), d.method, d.windowSize, d.sigmaSpatial, d.sigmaRange, d.guidedEps);
+fprintf('gradientWeight.opts.mapping = struct(''type'',''%s'',''gamma'',%.17g);\n', ...
+    mapping.type, mapping.gamma);
+fprintf('weightSmooth.windowSize = %g;\n', weightSmooth.windowSize);
+fprintf('来源或分析参数改变后需重新标定；比较映射时请使用本来源的同组门限。\n');
 figs = showGradientWeightDebug(dbg, struct('save', false));
 if saveResults
     exportgraphics(figs.maps, fullfile(outputDir, [tag '_maps.png']), 'Resolution', 150);
     writetable(roiStats, fullfile(outputDir, [tag '_roiStats.csv']));
-    save(fullfile(outputDir, [tag '_params.mat']), 'calibration', 'roiStats', 'W', 'dbg');
+    paramsUsed = dbg.paramsUsed;
+    G = dbg.G;
+    validMask = dbg.validMask;
+    save(fullfile(outputDir, [tag '_params.mat']), 'calibration', 'roiStats', ...
+        'paramsUsed', 'G', 'W', 'W_smooth', 'validMask', 'weightSmooth', 'dbg');
     fprintf('Saved calibration outputs to: %s\n', outputDir);
 end
 

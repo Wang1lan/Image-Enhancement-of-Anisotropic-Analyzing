@@ -1,10 +1,12 @@
 function [W, debug] = computeGradientWeight(I, opts)
-%COMPUTEGRADIENTWEIGHT 保边降噪引导的 Sobel L1 梯度增强权重。
+%COMPUTEGRADIENTWEIGHT 可选保边降噪及非线性映射的 Sobel L1 梯度权重。
 %   [W,debug] = computeGradientWeight(I,opts)
 %   I：至少 3x3 的二维 uint8/uint16/single/double，范围 [0,inputMax]。
 %   GLow/GHigh 必填，单位为固定满量程归一化后的 Sobel L1 幅值。
 %   有效区 W 属于 [Wmin,1]；validMask 只屏蔽最终 W 和统计，不改变滤波输入。
 %   denoise.sigmaRange/guidedEps 使用输入原生灰度级/灰度级平方。
+%   mapping.type='linear'/'power'/'smoothstep'，gamma 为正数且仅 power 参与计算。
+%   返回 W 为映射后、空间平滑前的权重。
 %   debugLevel='off'/'stats'/'maps'；off 或不取第二输出时跳过附加统计。
 %   本函数只分析亮度，不修改增强底图或带通细节，不绘图或保存文件。
 
@@ -52,7 +54,8 @@ Gx = filterShiftSum(Yguide, Kx, 'replicate');
 Gy = filterShiftSum(Yguide, Kx', 'replicate');
 G = abs(Gx) + abs(Gy);
 t = min(max((G-p.GLow) / (p.GHigh-p.GLow), 0), 1);
-W = p.Wmin + (1-p.Wmin) .* t;
+f = mapNormalizedGradient(t, p.mapping);
+W = p.Wmin + (1-p.Wmin) .* f;
 W(~mask) = 0;
 
 debug = struct();
@@ -82,6 +85,7 @@ if strcmp(p.debugLevel, 'maps')
     debug.Gx = Gx;
     debug.Gy = Gy;
     debug.G = G;
+    debug.t = t;
     debug.W = W;
     debug.validMask = mask;
 end
@@ -90,8 +94,10 @@ end
 function p = parseOptions(opts)
 denoiseDefaults = struct('enable', true, 'method', 'bilateral', ...
     'windowSize', 5, 'sigmaSpatial', 1.5, 'sigmaRange', 10, 'guidedEps', 4);
+mappingDefaults = struct('type', 'linear', 'gamma', 2);
 p = struct('inputMax', 255, 'GLow', [], 'GHigh', [], 'Wmin', .3, ...
-    'validMask', [], 'debugLevel', 'off', 'denoise', denoiseDefaults);
+    'validMask', [], 'debugLevel', 'off', 'denoise', denoiseDefaults, ...
+    'mapping', mappingDefaults);
 p = mergeOptions(p, opts);
 validateattributes(p.inputMax, {'numeric'}, {'real','scalar','finite','positive'});
 validateattributes(p.Wmin, {'numeric'}, {'real','scalar','finite','>=',0,'<=',1});
@@ -109,6 +115,10 @@ assert(0 <= p.GLow && p.GLow < p.GHigh && p.GHigh <= 1, ...
 p.GLow = double(p.GLow);
 p.GHigh = double(p.GHigh);
 p.debugLevel = validatestring(p.debugLevel, {'off','stats','maps'});
+p.mapping = mergeOptions(mappingDefaults, p.mapping);
+p.mapping.type = validatestring(p.mapping.type, {'linear','power','smoothstep'});
+validateattributes(p.mapping.gamma, {'numeric'}, {'real','scalar','finite','positive'});
+p.mapping.gamma = double(p.mapping.gamma);
 p.denoise = mergeOptions(denoiseDefaults, p.denoise);
 d = p.denoise;
 validateattributes(d.enable, {'logical'}, {'scalar'});
@@ -132,7 +142,7 @@ end
 
 function p = mergeOptions(p, opts)
 assert(isstruct(opts) && isscalar(opts), ...
-    'computeGradientWeight:Options', 'opts 和 denoise 必须为标量结构体。');
+    'computeGradientWeight:Options', 'opts、denoise 和 mapping 必须为标量结构体。');
 names = fieldnames(opts);
 unknown = setdiff(names, fieldnames(p));
 assert(isempty(unknown), 'computeGradientWeight:UnknownOption', '存在未知选项字段。');
