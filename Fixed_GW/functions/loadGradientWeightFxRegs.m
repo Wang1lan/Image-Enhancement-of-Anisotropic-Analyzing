@@ -1,0 +1,23 @@
+function regs = loadGradientWeightFxRegs(Wmin12, Tlow_Q6, Thigh_Q6, K_Q17)
+%LOADGRADIENTWEIGHTFXREGS 整组装载四个整数寄存器，返回单帧像素配置。
+%   regs = loadGradientWeightFxRegs(w,L,H,K_Q17)，R3 为 u17/Q17。
+limits = [410 2048; 0 203374; 6290 209664; 1280 76801];
+values = {Wmin12, Tlow_Q6, Thigh_Q6, K_Q17};
+for k = 1:4
+    v = values{k};
+    assert(isnumeric(v) && isreal(v) && isscalar(v) && isfinite(v) && ...
+        v == fix(v) && double(v) >= limits(k,1) && double(v) <= limits(k,2), ...
+        'loadGradientWeightFxRegs:Range', 'R%d 必须是规定范围内的整数。', k-1);
+end
+% 先以宽容器校验整套值，成功后才向寄存器存储类型缩窄。
+assert(uint64(Thigh_Q6) >= uint64(Tlow_Q6) + uint64(6289), ...
+    'loadGradientWeightFxRegs:Range', '量化阈值间隔必须至少为 6289 个 Q6 码。');
+distance = uint64(Thigh_Q6) - uint64(Tlow_Q6);        % u18 [6289,209664]
+expected = gradientWeightSlopeWord(Wmin12,distance);
+assert(uint64(K_Q17) == uint64(expected), 'loadGradientWeightFxRegs:Mismatch', ...
+    'R3 的 Q17 斜率与最低权重或阈值不匹配。');
+regs = struct('Wmin12',uint16(Wmin12), 'Tlow_Q6',uint32(Tlow_Q6), ...
+    'Thigh_Q6',uint32(Thigh_Q6), 'D_Q6',uint32(distance), 'K_Q17',expected, ...
+    'fracBitsGradient',6, 'fracBitsSlope',17, 'inputMax',4095, ...
+    'Format',"Q17", 'SlopeWord',expected, 'C',expected, 's',17); % 已有 Q17 报告字段
+end
